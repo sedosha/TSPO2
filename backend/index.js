@@ -1,17 +1,19 @@
-// backend/index.js
-//import GigaChat from 'gigachat';
-
 import express from 'express';
 import cors from 'cors';
 import pkg from 'pg';
 import 'dotenv/config';
-//import GigaChat from 'gigachat';
-//import { Agent } from 'node:https';
+import axios from 'axios';
+import https from 'https';
+import bcrypt from 'bcrypt';
 
 const { Pool } = pkg;
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+
+const httpsAgent = new https.Agent({ rejectUnauthorized: false });
+
 
 const pool = new Pool({
     host: process.env.DB_HOST || 'localhost',
@@ -23,40 +25,60 @@ const pool = new Pool({
 
 pool.connect((err) => {
     if (err) console.error('Ошибка подключения к БД', err);
-    else console.log('Подключено к PostgreSQL');
+    else console.log('✅ Подключено к PostgreSQL');
 });
+
 
 function unescapeDbString(str) {
     if (!str) return '';
     return str.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
 }
 
-// const httpsAgent = new Agent({
-//     rejectUnauthorized: false, // Рекомендуется для разработки
-// });
-// const gigachatClient = new GigaChat({
-//     credentials: process.env.GIGACHAT_CREDENTIALS,
-//     httpsAgent: httpsAgent,
-//     model: 'GigaChat-Pro',
-//     timeout: 600,
-// });
-
 app.post('/api/register', async (req, res) => {
-    const { username } = req.body;
-    if (!username) return res.status(400).json({ error: 'Имя пользователя обязательно' });
+    const { username, password } = req.body;
+    if (!username || !password) {
+        return res.status(400).json({ error: 'Имя пользователя и пароль обязательны' });
+    }
     try {
-        let user = await pool.query('SELECT id FROM users WHERE username = $1', [username]);
-        if (user.rows.length === 0) {
-            const result = await pool.query('INSERT INTO users (username) VALUES ($1) RETURNING id', [username]);
-            return res.json({ userId: result.rows[0].id, isNew: true });
-        } else {
-            return res.json({ userId: user.rows[0].id, isNew: false });
+        const existing = await pool.query('SELECT id FROM users WHERE username = $1', [username]);
+        if (existing.rows.length > 0) {
+            return res.status(400).json({ error: 'Пользователь с таким именем уже существует' });
         }
+        const saltRounds = 10;
+        const passwordHash = await bcrypt.hash(password, saltRounds);
+        const result = await pool.query(
+            'INSERT INTO users (username, password_hash) VALUES ($1, $2) RETURNING id',
+            [username, passwordHash]
+        );
+        res.json({ userId: result.rows[0].id });
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Ошибка сервера' });
     }
 });
+
+
+app.post('/api/login', async (req, res) => {
+    const { username, password } = req.body;
+    if (!username || !password) {
+        return res.status(400).json({ error: 'Имя пользователя и пароль обязательны' });
+    }
+    try {
+        const user = await pool.query('SELECT id, password_hash FROM users WHERE username = $1', [username]);
+        if (user.rows.length === 0) {
+            return res.status(401).json({ error: 'Неверное имя пользователя или пароль' });
+        }
+        const valid = await bcrypt.compare(password, user.rows[0].password_hash);
+        if (!valid) {
+            return res.status(401).json({ error: 'Неверное имя пользователя или пароль' });
+        }
+        res.json({ userId: user.rows[0].id });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Ошибка сервера' });
+    }
+});
+
 
 app.get('/api/categories', async (req, res) => {
     const { userId } = req.query;
@@ -78,6 +100,7 @@ app.get('/api/categories', async (req, res) => {
     }
 });
 
+
 app.get('/api/category-theory/:categoryId', async (req, res) => {
     const { categoryId } = req.params;
     try {
@@ -90,6 +113,7 @@ app.get('/api/category-theory/:categoryId', async (req, res) => {
         res.status(500).json({ error: 'Ошибка загрузки теории' });
     }
 });
+
 
 app.get('/api/exercises', async (req, res) => {
     const { categoryId, userId } = req.query;
@@ -117,6 +141,7 @@ app.get('/api/exercises', async (req, res) => {
         res.status(500).json({ error: 'Ошибка загрузки упражнений' });
     }
 });
+
 
 app.post('/api/check-macro', async (req, res) => {
     const { userId, exerciseId, userCode } = req.body;
@@ -151,140 +176,6 @@ app.post('/api/check-macro', async (req, res) => {
     }
 });
 
-// ЗАГЛУШКА 
-app.post('/api/generate-macro', (req, res) => {
-    const { description } = req.body;
-    if (!description) {
-        return res.status(400).json({ error: 'Описание макроса не может быть пустым.' });
-    }
-
-    const lowerDesc = description.toLowerCase();
-    let generatedCode = '';
-
-    // Генерация на основе ключевых слов
-    if (lowerDesc.includes('calc') || lowerDesc.includes('таблиц') || lowerDesc.includes('ячейк') || lowerDesc.includes('лист')) {
-        generatedCode = `Sub MacroForCalc()
-    ' 🔹 Сгенерировано по описанию: "${description.substring(0, 80)}"
-    Dim oSheet As Object
-    oSheet = ThisComponent.getSheets().getByIndex(0)
-    
-    ' Пример: работа с ячейками
-    oSheet.getCellByPosition(0,0).setValue(100)   ' A1 = 100
-    oSheet.getCellByPosition(1,0).setString("Привет")
-    
-    MsgBox "Макрос для Calc выполнен"
-End Sub`;
-    } 
-    else if (lowerDesc.includes('writer') || lowerDesc.includes('текст') || lowerDesc.includes('документ')) {
-        generatedCode = `Sub MacroForWriter()
-    ' 🔹 Сгенерировано по описанию: "${description.substring(0, 80)}"
-    Dim oText As Object
-    oText = ThisComponent.Text
-    oText.insertString(oText.End, "Текст, добавленный макросом", False)
-    
-    MsgBox "Текст добавлен в конец документа"
-End Sub`;
-    }
-    else if (lowerDesc.includes('msgbox') || lowerDesc.includes('сообщение')) {
-        generatedCode = `Sub ShowMessage()
-    ' 🔹 Сгенерировано по описанию: "${description.substring(0, 80)}"
-    MsgBox "Ваше сообщение"
-End Sub`;
-    }
-    else {
-        generatedCode = `Sub DemoMacro()
-    ' 🔹 Сгенерировано по описанию: "${description.substring(0, 80)}"
-    MsgBox "Макрос создан по вашему запросу: ${description.substring(0, 50)}"
-End Sub`;
-    }
-
-    setTimeout(() => {
-        res.json({ generatedCode });
-    }, 500);
-});
-
-// app.post('/api/generate-macro', async (req, res) => {
-//     const { description } = req.body;
-//     if (!description) {
-//         return res.status(400).json({ error: 'Описание макроса не может быть пустым.' });
-//     }
-
-//     try {
-//         const giga = new GigaChat({
-//             credentials: process.env.GIGACHAT_CREDENTIALS, // из .env
-//         });
-
-//         const response = await giga.chat({
-//             messages: [
-//                 {
-//                     role: 'system',
-//                     content: 'Ты — эксперт по написанию макросов для LibreOffice на языке Basic. Твоя задача — по описанию пользователя создать готовый код макроса. Код должен начинаться с Sub и заканчиваться End Sub. Не добавляй пояснений, только код.'
-//                 },
-//                 {
-//                     role: 'user',
-//                     content: description
-//                 }
-//             ],
-//             model: 'GigaChat-Pro',
-//         });
-
-//         const generatedCode = response.choices?.[0]?.message?.content || 'Не удалось сгенерировать код.';
-//         res.json({ generatedCode });
-//     } catch (error) {
-//         console.error('Ошибка GigaChat:', error);
-//         res.status(500).json({ error: 'Ошибка генерации макроса: ' + error.message });
-//     }
-// });
-
-// // Новый маршрут для генерации макроса
-// app.post('/api/generate-macro', async (req, res) => {
-//     // 1. Получаем описание макроса от пользователя
-//     const { description } = req.body;
-//     if (!description) {
-//         return res.status(400).json({ error: 'Описание макроса не может быть пустым.' });
-//     }
-
-//     try {
-//         // 2. Инициализируем клиент GigaChat с вашим API-ключом
-//         const client = new GigaChat({
-//             apiKey: process.env.GIGACHAT_API_KEY,
-//         });
-
-//         // 3. Формируем "промпт" (инструкцию) для нейросети
-//         //    Это самое важное место. Хороший промпт = хороший результат.
-//         const systemPrompt = `
-//             Ты — эксперт по написанию макросов для LibreOffice на языке Basic. 
-//             Твоя задача — по описанию пользователя создать готовый, рабочий код макроса. 
-//             Код должен быть идеально отформатирован и начинаться с 'Sub' и заканчиваться 'End Sub'. 
-//             Не добавляй никаких пояснений к коду, только сам код. 
-//             Если описание невозможно реализовать, напиши 'Невозможно создать макрос по данному описанию.'.
-//         `;
-
-//         // 4. Отправляем запрос модели
-//         const chatCompletion = await client.chat.completions.create({
-//             messages: [
-//                 { role: "system", content: systemPrompt },
-//                 { role: "user", content: description }
-//             ],
-//             model: 'GigaChat-Pro', // Можно использовать и другие модели
-//             temperature: 0.7,      // Контролирует "креативность" ответа (0.0 - 1.0)
-//             max_tokens: 1000       // Максимальная длина ответа
-//         });
-
-//         // 5. Извлекаем сгенерированный код из ответа
-//         const generatedCode = chatCompletion.choices[0]?.message?.content;
-        
-//         if (!generatedCode) {
-//             throw new Error('Не удалось получить ответ от GigaChat.');
-//         }
-
-//         // 6. Отправляем готовый код обратно на фронтенд
-//         res.json({ generatedCode });
-//     } catch (error) {
-//         console.error('Ошибка при запросе к GigaChat API:', error);
-//         res.status(500).json({ error: 'Не удалось сгенерировать макрос. Попробуйте ещё раз.' });
-//     }
-// });
 
 app.get('/api/user/progress', async (req, res) => {
     const { userId } = req.query;
@@ -329,13 +220,11 @@ app.get('/api/category-themes/:categoryId', async (req, res) => {
     if (!userId) return res.status(400).json({ error: 'userId обязателен' });
 
     try {
-        
         const theories = await pool.query(
             'SELECT id, title, content, order_index FROM theory_blocks WHERE category_id = $1 ORDER BY order_index',
             [categoryId]
         );
 
-       
         const themes = [];
         for (const theory of theories.rows) {
             const exerciseRes = await pool.query(
@@ -375,7 +264,136 @@ app.get('/api/category-themes/:categoryId', async (req, res) => {
     }
 });
 
+
+async function getGigaChatToken(authKey) {
+    const url = 'https://ngw.devices.sberbank.ru:9443/api/v2/oauth';
+    const data = 'scope=GIGACHAT_API_PERS';
+    const headers = {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept': 'application/json',
+        'RqUID': '11111111-1111-1111-1111-111111111111',
+        'Authorization': `Basic ${authKey}`,
+    };
+    const response = await axios.post(url, data, { headers, httpsAgent });
+    return response.data.access_token;
+}
+
+async function generateMacroViaGigaChat(authKey, description) {
+    const token = await getGigaChatToken(authKey);
+    const url = 'https://gigachat.devices.sberbank.ru/api/v1/chat/completions';
+    
+    const systemPrompt = `Ты — эксперт по написанию макросов на LibreOffice Basic. Твоя задача — сгенерировать полностью рабочий, чистый и безопасный макрос для LibreOffice (Writer, Calc или Base — укажи нужное), который выполняет следующую задачу.
+
+**Требования к макросу:**
+- Используй только стандартные библиотеки LibreOffice (не подключай внешние).
+- Код должен быть совместим с последними версиями LibreOffice.
+- Все переменные должны иметь понятные имена и быть объявлены (Option Explicit).
+- Макрос не должен вызывать ошибок при запуске, даже если документ пуст или нет нужных данных.
+- Использовать только синтаксис и методы LibreOffice Basic. Не использовать конструкции из VBA или других диалектов.
+- Не используй MsgBox и обработчики ошибок On Error Goto.
+
+**Формат ответа:**
+- Только код макроса, без пояснений и текста.
+- Код должен быть сразу готов к копированию в LibreOffice Basic IDE.`;
+
+    const payload = {
+        model: 'GigaChat-Pro',
+        messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: description }   // описание задачи от пользователя
+        ],
+        temperature: 0.4,
+        max_tokens: 500,
+    };
+    const headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${token}`,
+    };
+    const response = await axios.post(url, payload, { headers, httpsAgent });
+    return response.data.choices[0].message.content;
+}
+
+app.post('/api/generate-macro', async (req, res) => {
+    const { description } = req.body;
+    if (!description) {
+        return res.status(400).json({ error: 'Описание макроса не может быть пустым.' });
+    }
+    const authKey = process.env.GIGACHAT_AUTH_KEY;
+    if (!authKey) {
+        console.error('❌ GIGACHAT_AUTH_KEY не задан в .env');
+        return res.status(500).json({ error: 'Сервер не настроен для работы с GigaChat' });
+    }
+    try {
+        const generatedCode = await generateMacroViaGigaChat(authKey, description);
+        res.json({ generatedCode });
+    } catch (error) {
+        console.error('Ошибка GigaChat:', error.response?.data || error.message);
+        res.status(500).json({ error: 'Ошибка генерации макроса. Попробуйте позже.' });
+    }
+});
+
+
+app.post('/api/get-ai-hint', async (req, res) => {
+    const { userCode, solutionCode, description } = req.body;
+    if (!userCode || !solutionCode || !description) {
+        return res.status(400).json({ error: 'Не хватает данных для подсказки' });
+    }
+
+    const prompt = `
+Пользователь пытался написать макрос для LibreOffice Basic с таким заданием:
+"${description}"
+
+Его код:
+\`\`\`
+${userCode}
+\`\`\`
+
+Правильный (эталонный) код:
+\`\`\`
+${solutionCode}
+\`\`\`
+
+Проанализируй, в чём ошибка пользователя, и дай краткую, конструктивную подсказку (2-3 предложения), без готового кода, только объяснение, что исправить. Если код пользователя уже правильный – скажи об этом. 
+Подсказка:
+`;
+
+    try {
+       
+        const authKey = process.env.GIGACHAT_AUTH_KEY;
+        let hintText = '';
+
+        if (authKey) {
+            try {
+               
+                const generatedHint = await generateMacroViaGigaChat(authKey, prompt);
+                hintText = generatedHint;
+            } catch (err) {
+                console.error('Ошибка получения подсказки от GigaChat:', err);
+                hintText = 'Не удалось получить подсказку от ИИ. Попробуйте позже.';
+            }
+        } else {
+        
+            if (!userCode.includes('Sub') || !userCode.includes('End Sub')) {
+                hintText = '❌ Вы забыли ключевые слова Sub или End Sub. Макрос должен начинаться с Sub и заканчиваться End Sub.';
+            } else if (!userCode.includes('MsgBox') && description.toLowerCase().includes('msgbox')) {
+                hintText = '💡 Задание просит вывести сообщение. Используйте MsgBox "Ваш текст".';
+            } else if (userCode.trim() === solutionCode.trim()) {
+                hintText = '✅ Ваш код уже правильный! Возможно, проблема в лишних пробелах или регистре.';
+            } else {
+                hintText = '🤔 Сравните ваш код с эталоном. Обратите внимание на синтаксис и правильное использование команд.';
+            }
+        }
+
+        res.json({ hint: hintText });
+    } catch (error) {
+        console.error('Ошибка при генерации подсказки:', error);
+        res.status(500).json({ error: 'Не удалось получить подсказку' });
+    }
+});
+
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-    console.log(`Backend запущен на http://localhost:${PORT}`);
+    console.log(`🚀 Backend запущен на http://localhost:${PORT}`);
 });
